@@ -1,0 +1,1 @@
+model,test#,train_test,iter,loss,acc,forwardnfe,backwardnfe,time/iter,time_elapsed
