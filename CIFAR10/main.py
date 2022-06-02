@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+import random
+import numpy as np
 # from torch.utils.data import Dataset, DataLoader
 # from torch.distributions import Normal
 # from torchvision import datasets, transforms
@@ -17,8 +20,13 @@ import argparse
 import utils
 import models
 
-import numpy as np
-import random
+import loss_landscapes
+import loss_landscapes.metrics
+
+import copy
+
+import matplotlib.pyplot as plt
+
 # Format [time, batch, diff, vector]
 
 def main(argv=None):
@@ -31,9 +39,9 @@ def main(argv=None):
         '--model',
         choices=[
             'hbnode', 'ghbnode', 'sonode',
-            'anode', 'node', 'adam'
+            'anode', 'node', 'adamnode'
         ],
-        default='adam',
+        default='hbnode',
         help="Determines which Neural ODE algorithm is used"
     )
 
@@ -53,7 +61,7 @@ def main(argv=None):
     parser.add_argument(
         '--adjoint',
         type=eval,
-        default=True
+        default=False
     )
 
     parser.add_argument(
@@ -102,10 +110,36 @@ def main(argv=None):
         default=7
     )
 
+    parser.add_argument(
+        '--hidden_size',
+        type=int,
+        default=31
+    )
+
+    parser.add_argument(
+        '--beta_1',
+        type=float,
+        default=3.0
+    )
+
+    parser.add_argument(
+        '--beta_2',
+        type=float,
+        default=3.0
+    )
+
+    parser.add_argument(
+        '--sqrt',
+        choices=[
+            'sigmoid', 'softplus', 'tanh'
+        ],
+        default='sigmoid',
+    )
+
     # make a parser
     args = parser.parse_args(argv)
 
-    randomSeed = args.seed
+    randomSeed = args.seed # 2022
     torch.manual_seed(randomSeed)
     torch.cuda.manual_seed(randomSeed)
     torch.cuda.manual_seed_all(randomSeed)  # if use multi-GPU
@@ -120,24 +154,23 @@ def main(argv=None):
     # Some hypers
     thetaact = nn.Tanh()
     gamma = nn.Parameter(torch.tensor([0.0]))
-
-    # create the model nodes
-    if args.model == 'adam':
-        dim = 12
-        hidden = 31
-        args.xres = 0
-        df = models.DF(dim, hidden, args=args)
-        iv = models.initial_velocity_2(3, dim, hidden)
-        model_layer = models.NODElayer(models.Adam(df, None, thetaact=None, timescale=args.timescale), args=args)
     
-    elif args.model == 'ghbnode':
+    hidden_size = args.hidden_size
+    sqrt = args.sqrt
+    beta_1 = args.beta_1 
+    beta_2 = args.beta_2
+    if args.model == 'ghbnode':
         dim = 12
         hidden = 51
         args.xres = 1.5
         df = models.DF(dim, hidden, args=args)
         model_layer = models.NODElayer(models.HeavyBallNODE(df, None, thetaact=thetaact, timescale=args.timescale), args=args) 
         iv = models.initial_velocity(3, dim, hidden)
-
+        model = nn.Sequential(
+            iv,
+            model_layer,
+            models.predictionlayer(dim)
+            ).to(device=f'cuda:{args.gpu}')
     elif args.model == 'hbnode':
         dim = 12
         hidden = 51
@@ -145,18 +178,50 @@ def main(argv=None):
         df = models.DF(dim, hidden, args=args)
         iv = models.initial_velocity(3, dim, hidden)
         model_layer = models.NODElayer(models.HeavyBallNODE(df, None, thetaact=None, timescale=args.timescale), args=args)
+        # create the model
+        model = nn.Sequential(
+            iv,
+            model_layer,
+            models.predictionlayer(dim)
+            ).to(device=f'cuda:{args.gpu}')
+    elif args.model == 'adamnode':
+        dim = 12
+        hidden = hidden_size # 51 25
+        args.xres = 0
+        df = models.DF(dim, hidden, args=args)
+        iv = models.initial_velocity_adam(3, dim, hidden)
+        model_layer = models.NODElayer(models.AdamNODE(df, None, thetaact=None, sqrt=sqrt, beta_1 = beta_1, beta_2 = beta_2, timescale=args.timescale), args=args)
+        # create the model
+        model = nn.Sequential(
+            iv,
+            model_layer,
+            models.predictionlayer_adam(dim)
+            ).to(device=f'cuda:{args.gpu}')
     elif args.model == 'anode':
         dim = 13
         hidden = 64
         df = models.DF(dim, hidden, args=args)
         model_layer = models.NODElayer(models.NODE(df), args=args)
         iv = models.anode_initial_velocity(3, aug=dim, args=args)
+        # create the model
+        model = nn.Sequential(
+            iv,
+            model_layer,
+            models.predictionlayer(dim)
+            ).to(device=f'cuda:{args.gpu}')
     elif args.model == 'node':
         dim = 3
         hidden = 125
         df = models.DF(dim, hidden, args=args)
         model_layer = models.NODElayer(models.NODE(df), args=args)
         iv = models.anode_initial_velocity(3, aug=dim, args=args)
+        # create the model
+        model = nn.Sequential(
+            iv,
+            model_layer,
+            models.predictionlayer(dim)
+            ).to(device=f'cuda:{args.gpu}')
+
         # iv = models.initial_velocity(3, dim, hidden)
     elif args.model == 'sonode':
         dim = 12
@@ -165,12 +230,12 @@ def main(argv=None):
         model_layer = models.NODElayer(models.SONODE(df), args=args)
         iv = models.initial_velocity(3, dim, hidden)
 
-    # create the model
-    model = nn.Sequential(
-        iv,
-        model_layer,
-        models.predictionlayer(dim)
-        ).to(device=f'cuda:{args.gpu}')
+        # create the model
+        model = nn.Sequential(
+            iv,
+            model_layer,
+            models.predictionlayer(dim)
+            ).to(device=f'cuda:{args.gpu}')
      
     # optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -181,6 +246,24 @@ def main(argv=None):
 
     # train the model
     utils.train(model, optimizer, trdat, tsdat, args=args)
+    
+    # model_final = copy.deepcopy(model)
+    # criterion = nn.CrossEntropyLoss()
+    # # import pdb; pdb.set_trace()
+    # x, y = iter(trdat).__next__()
+    # x = x.to(device=f'cuda:{args.gpu}')
+    # y = y.to(device=f'cuda:{args.gpu}')
+    # metric = loss_landscapes.metrics.Loss(criterion, x, y)
+    # loss_data_fin = loss_landscapes.random_plane(model_final, metric, 10, STEPS,
+    #                                                 normalization='layer', deepcopy_model=True)
+    
+    # plt.figure()
+    # ax = plt.axes(projection='3d')
+    # X = np.array([[j for j in range(STEPS)] for i in range(STEPS)])
+    # Y = np.array([[i for _ in range(STEPS)] for i in range(STEPS)])
+    # ax.plot_surface(X, Y, loss_data_fin, rstride=1, cstride=1, cmap='viridis', edgecolor='none')
+    # ax.set_title('Surface Plot of Loss Landscape')
+    # plt.savefig('./'+str(args.model)+'_'+str(args.hidden_size)+'_'+str(args.beta_1)+'_'+str(args.beta_2)+'_'+str(args.sqrt)+'_'+'.png')
 
 if __name__ == "__main__":
     main()

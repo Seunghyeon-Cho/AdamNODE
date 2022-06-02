@@ -120,28 +120,28 @@ def train(model, optimizer, trdat, tsdat, args):
         print(str_rec(rec_names, printouts, rec_unit, presets="Train|| {}"))
         outlist.append(printouts)
         writer.writerow(printouts)
-        if epoch % 2 == 0:
-            model[1].df.nfe = 0
-            test_start_time = time.time()
-            loss = 0
-            acc = 0
-            dsize = 0
-            bcnt = 0
-            for x, y in tsdat:
-                # forward in time and solve ode
-                dsize += y.shape[0]
-                y = y.to(device=args.gpu)
-                pred_y = model(x.to(device=args.gpu)).detach()
-                pred_l = torch.argmax(pred_y, dim=1)
-                acc += torch.sum((pred_l == y).float())
-                bcnt += 1
-                # compute loss
-                loss += loss_func(pred_y, y).detach() * y.shape[0]
-            test_time = time.time() - test_start_time
-            loss /= dsize
-            acc /= dsize
-            printouts = [epoch, loss.detach().cpu().numpy(), acc.detach().cpu().numpy(), str(model[1].df.nfe / bcnt), None, test_time, (time.time()-start_time)/60]
-            print(str_rec(rec_names, printouts, presets="Test || {}"))
-            outlist.append(printouts)
-            writer.writerow(printouts)
+        # if epoch % 2 == 0:
+        model[1].df.nfe = 0
+        test_start_time = time.time()
+        loss = 0
+        acc = 0
+        dsize = 0
+        bcnt = 0
+        for x, y in tsdat:
+            # forward in time and solve ode
+            dsize += y.shape[0]
+            y = y.to(device=args.gpu)
+            pred_y = model(x.to(device=args.gpu)).detach()
+            pred_l = torch.argmax(pred_y, dim=1)
+            acc += torch.sum((pred_l == y).float())
+            bcnt += 1
+            # compute loss
+            loss += loss_func(pred_y, y).detach() * y.shape[0]
+        test_time = time.time() - test_start_time
+        loss /= dsize
+        acc /= dsize
+        printouts = [epoch, loss.detach().cpu().numpy(), acc.detach().cpu().numpy(), str(model[1].df.nfe / bcnt), None, test_time, (time.time()-start_time)/60]
+        print(str_rec(rec_names, printouts, presets="Test || {}"))
+        outlist.append(printouts)
+        writer.writerow(printouts)
     return outlist
